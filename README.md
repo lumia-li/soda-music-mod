@@ -34,8 +34,6 @@ node deploy-appdir.mjs --res "X:\你的路径\Soda Music\版本号\resources"
 node deploy-appdir.mjs --restore
 ```
 
-可选：把 `misans.woff2` 放在项目根目录，作为任务栏播控的字体。
-
 本项目只在作者本机的一个版本(3.8.0)上调试过，没有做跨版本适配，客户端升级后部分功能可能失效。
 
 ## 免责声明
