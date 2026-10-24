@@ -1,0 +1,11 @@
+{
+  "name": "soda-music-mod",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "汽水音乐 Windows 桌面版功能增强补丁：resources/app 目录部署 + 主进程 CDP 注入",
+  "scripts": {
+    "deploy": "node deploy-appdir.mjs",
+    "restore": "node deploy-appdir.mjs --restore"
+  }
+}
