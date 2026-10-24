@@ -1081,7 +1081,7 @@
     popHost = document.createElement('div');
     popHost.id = 'soda-speed-pop';
     popHost.style.cssText =
-      'position:fixed;left:50%;bottom:96px;z-index:' + CFG.zIndex + ';' +
+      'position:fixed;left:50%;bottom:96px;z-index:' + CFG.zIndex + ';display:none;' +
       'transform:translate(-50%,10px);opacity:0;pointer-events:none;' +
       'transition:opacity .2s ease,transform .2s cubic-bezier(.22,.8,.3,1);';
 
@@ -1206,11 +1206,21 @@
 
   }
 
+  var popOpen = false;
+  var popHideTimer = 0;
+
   function showPopup() {
     buildPopup();
     placePopup();
     renderPopup();
+    popOpen = true;
+    if (popHideTimer) { clearTimeout(popHideTimer); popHideTimer = 0; }
+    popHost.style.display = '';
     requestAnimationFrame(function () {
+      /* 可能在动画帧之前就被关掉了。这里必须再确认一次：
+         否则会把 pointer-events 又设回 auto —— 弹窗看不见，却一直挡着
+         下面那排播放按钮，表现就是「关不掉、点什么都没反应」。 */
+      if (!popOpen || !popHost) return;
       popHost.style.opacity = suspended ? '0.55' : '1';
       popHost.style.transform = 'translate(-50%,0)';
       popHost.style.pointerEvents = 'auto';
@@ -1218,23 +1228,42 @@
   }
 
   function hidePopup() {
+    popOpen = false;
     if (!popHost) return;
     popHost.style.opacity = '0';
     popHost.style.transform = 'translate(-50%,10px)';
     popHost.style.pointerEvents = 'none';
+    if (popHideTimer) clearTimeout(popHideTimer);
+    popHideTimer = setTimeout(function () {
+      popHideTimer = 0;
+      /* 淡出结束后整块移出布局：即便有别的代码把 pointer-events 改回 auto，
+         也不会再拦住下面的点击 */
+      if (!popOpen && popHost) popHost.style.display = 'none';
+    }, 240);
   }
 
   function togglePopup() {
-    if (popHost && popHost.style.pointerEvents === 'auto') hidePopup();
+    if (popOpen) hidePopup();
     else showPopup();
   }
 
   document.addEventListener('mousedown', function (e) {
-    if (!popHost || popHost.style.pointerEvents !== 'auto') return;
+    if (!popOpen || !popHost) return;
     var path = e.composedPath ? e.composedPath() : [];
     if (path.indexOf(popHost) >= 0) return;
     hidePopup();
   }, true);
+
+  /* Esc 也能关：万一点击落空，至少还有键盘这条退路 */
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && popOpen) hidePopup();
+  }, true);
+
+  /* 兜底守护：已经关闭却还在接收点击时强制复位，避免整块界面被一个看不见的弹窗挡住 */
+  setInterval(function () {
+    if (popOpen || !popHost) return;
+    if (popHost.style.pointerEvents === 'auto') popHost.style.pointerEvents = 'none';
+  }, 1000);
 
   /* ================= 「更多」菜单注入 ================= */
 
