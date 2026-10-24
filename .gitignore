@@ -5,7 +5,3 @@ misans.ttf
 *.log
 .DS_Store
 Thumbs.db
-
-# 本地工具 / 助手缓存，不发布
-.workbuddy-ai/
-.codebuddy/
