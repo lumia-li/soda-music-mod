@@ -237,15 +237,23 @@
   function isSettingsAboutPage() {
     try {
       var h = String(location.hash || '');
+      /* 关于页 /about，以及它下面的「营业执照和平台资质」/business-license：
+         这两个页面复用同一套 Card + SettingMenuItem，但容器是窄栏 / 横向排列，
+         我们克隆进去的设置行会被挤成一条，所以整页都不注入。 */
       if (/\/about(\/|\?|$)/i.test(h)) return true;
+      if (/\/business-license(\/|\?|$)/i.test(h)) return true;
     } catch (e) { /* ignore */ }
+    try {
+      if (document.querySelector('.business-license')) return true;
+    } catch (e) { /* ignore */ }
+
     var sample = document.querySelector('.setting-menu-item');
     if (!sample) return false;
     var card = sample.parentElement;
     var box = card && card.parentElement;
     var text = '';
     try { text = (box && box.textContent) || ''; } catch (e) { text = ''; }
-    return /营业执照和平台资质|违法和不良信息举报电话|汽水智能客服|客户服务热线/.test(text);
+    return /营业执照和平台资质|营业执照|广播电视节目制作经营许可证|网络文化经营许可证|违法和不良信息举报电话|汽水智能客服|客户服务热线/.test(text);
   }
 
   function removeInjectedSettingRows() {
