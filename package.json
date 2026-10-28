@@ -5,6 +5,7 @@
   "type": "module",
   "description": "汽水音乐 Windows 桌面版功能增强补丁：resources/app 目录部署 + 主进程 CDP 注入",
   "scripts": {
+    "build": "node build.mjs",
     "deploy": "node deploy-appdir.mjs",
     "restore": "node deploy-appdir.mjs --restore"
   }

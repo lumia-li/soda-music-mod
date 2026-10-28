@@ -262,6 +262,10 @@ function injectWebContents(wc) {
     log('debugger.attach 失败: ' + e.message);
   }
 
+  /* 关掉后台节流：主窗口最小化 / 被别的窗口盖住时，Chromium 会把定时器
+     压到 1 秒甚至 1 分钟一次，表现为「必须把汽水唤到前台，播控的配色/进度才更新」 */
+  try { wc.setBackgroundThrottling(false); } catch (e) { /* ignore */ }
+
   // 兜底：页面加载完成后再补一次
   const late = () => {
     if (!MOD_CODE) return;
@@ -281,10 +285,130 @@ function injectWebContents(wc) {
 
   // 任务栏播控：尺寸对齐 MusicBar（430×46），按右下角锚定，避免吸附位置跑偏
   wc.on('did-finish-load', () => { injectWidgetFont(wc); fixWidgetSize(wc); });
+
+  /* 播控歌单面板：渲染层把 document.title 改成 SODAPANEL:down / up / off 当作信号。
+     播控窗没有 preload，拿不到 IPC，用标题事件传话最省事（标题本身会被拦下不改）。 */
+  wc.on('page-title-updated', function (event, title) {
+    const m = /^\s*SODAPANEL:(off|up|down)\s*$/.exec(String(title || ''));
+    if (!m) return;
+    try { event.preventDefault(); } catch (e) { /* ignore */ }
+    setWidgetPanel(m[1] === 'off' ? '' : m[1], wc);
+  });
 }
 
 const WIDGET_W = 430;
 const WIDGET_H = 46;
+const WIDGET_PANEL_H = 360;   // 歌单面板展开时窗口额外增加的高度
+
+/* 播控窗当前应有的高度：面板展开时连同面板一起算 */
+function widgetHeightOf(win) {
+  return (win && win.__sodaPanelOpen) ? WIDGET_H + WIDGET_PANEL_H : WIDGET_H;
+}
+
+/* 启动阶段（前 6 秒）把播控窗钉在「上次退出时的位置」：
+ * App 会在启动后反复 setBounds 把它吸回停靠位，我们改回去 → 它再改，
+ * 就成了肉眼可见的来回抢。这里直接忽略 App 在启动阶段设的坐标，
+ * 我们自己的移动走 __sodaAllowResize 通道，不受影响。 */
+function pinWidgetPos(win) {
+  if (!win || win.__sodaPanelOpen) return null;
+  if (Date.now() - widgetBootAt > 6000) return null;
+  /* 离屏阴影窗不要钉：它永远该待在屏幕外，钉到播控位置会变成一块挡住点击的透明窗 */
+  let cur = null;
+  try { cur = win.getBounds(); } catch (e) { cur = null; }
+  if (cur && cur.x <= -30000) return null;
+  const pos = loadWidgetPos();
+  if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number') return null;
+  return { x: pos.x, y: pos.y };
+}
+
+function widgetBaseWindow() {
+  let all = [];
+  try { all = electron.BaseWindow.getAllWindows(); } catch (e) { return null; }
+  for (const bw of all) {
+    let b;
+    try { b = bw.getBounds(); } catch (e) { continue; }
+    if (b.x <= -30000) continue;            // 离屏阴影窗
+    if (bw.__sodaIsWidget || bw.__sodaPanelOpen) return bw;
+  }
+  return null;
+}
+
+/* 展开 / 收起播控歌单面板。mode: 'down' | 'up' | ''（收起）
+ * up 模式下窗口整体上移、底边不动，播控条因此仍停在原来的屏幕位置。
+ *
+ * 注意：光改窗口尺寸是不够的 —— 播控页面挂在 BaseWindow 里的 WebContentsView 上，
+ * 内层视图不跟着放大，页面视口就还是 430x46（面板高度算出来是 0，什么都不显示）。
+ * 所以这里把「窗口 + contentView + 真正承载 wc 的那个 view」一起改。 */
+function setWidgetPanel(mode, wc) {
+  let host = null;
+  try { host = wc ? findWidgetHost(wc) : null; } catch (e) { host = null; }
+
+  const bw = (host && host.win) || widgetBaseWindow();
+  if (!bw) { log('播控面板: 没找到播控窗'); return; }
+
+  const view = (host && host.view) || null;
+  const cv = bw.contentView || null;
+
+  let b = null;
+  try { b = bw.getBounds(); } catch (e) { return; }
+  if (!b) return;
+
+  const applyBounds = function (x, y, h) {
+    bw.__sodaAllowResize = true;
+    if (cv) cv.__sodaAllowResize = true;
+    if (view) view.__sodaAllowResize = true;
+    try { bw.setBounds({ x: x, y: y, width: WIDGET_W, height: h }); } catch (e) { /* ignore */ }
+    try { if (cv && typeof cv.setBounds === 'function') cv.setBounds({ x: 0, y: 0, width: WIDGET_W, height: h }); } catch (e) { /* ignore */ }
+    try {
+      if (view && view !== cv && typeof view.setBounds === 'function') {
+        view.setBounds({ x: 0, y: 0, width: WIDGET_W, height: h });
+      }
+    } catch (e) { /* ignore */ }
+    bw.__sodaAllowResize = false;
+    if (cv) cv.__sodaAllowResize = false;
+    if (view) view.__sodaAllowResize = false;
+  };
+
+  if (!mode) {
+    const base = bw.__sodaPanelBase || { x: b.x, y: b.y };
+    bw.__sodaPanelOpen = false;
+    applyBounds(base.x, base.y, WIDGET_H);
+    bw.__sodaPos = base.x + ',' + base.y;
+    log('播控面板: 已收起');
+    return;
+  }
+
+  const fullH = WIDGET_H + WIDGET_PANEL_H;
+
+  /* 已经展开：只处理「展开方向」的变化 */
+  if (bw.__sodaPanelOpen || b.height >= fullH - 20) {
+    bw.__sodaPanelOpen = true;
+    const base0 = bw.__sodaPanelBase
+      || { x: b.x, y: mode === 'up' ? b.y + WIDGET_PANEL_H : b.y };
+    bw.__sodaPanelBase = base0;
+    const y0 = mode === 'up' ? base0.y - WIDGET_PANEL_H : base0.y;
+    if ((mode === 'up') !== (b.y < base0.y)) {
+      applyBounds(base0.x, y0, fullH);
+      bw.__sodaPos = base0.x + ',' + y0;
+    } else if (Math.abs(b.height - fullH) > 2) {
+      applyBounds(base0.x, y0, fullH);      // 高度不对就补一次
+    }
+    return;
+  }
+
+  const base = { x: b.x, y: b.y };
+  const y = mode === 'up' ? base.y - WIDGET_PANEL_H : base.y;
+
+  bw.__sodaPanelBase = base;
+  bw.__sodaPanelOpen = true;
+  applyBounds(base.x, y, fullH);
+  bw.__sodaPos = base.x + ',' + y;
+
+  let vb = null;
+  try { vb = view && typeof view.getBounds === 'function' ? view.getBounds() : null; } catch (e) { vb = null; }
+  log('播控面板: 已展开（' + mode + '）' + WIDGET_W + 'x' + fullH + ' @' + base.x + ',' + y
+    + ' 视图=' + (vb ? (vb.width + 'x' + vb.height) : '无'));
+}
 
 /* ================= 任务栏播控：屏蔽 App 的 move 监听 =================
  *
@@ -337,30 +461,47 @@ function patchBaseWindowSetters() {
     if (typeof orig !== 'function') return;
     BW.prototype[name] = function () {
       try {
-        if (this.__sodaIsWidget) {
+        /* __sodaAllowResize 只在我们自己展开/收起面板时置位，避免被这条锁改写 */
+        if (this.__sodaIsWidget && !this.__sodaAllowResize) {
           const args = Array.prototype.slice.call(arguments);
+          const h = widgetHeightOf(this);
           if (name === 'setSize' || name === 'setContentSize') {
-            return orig.call(this, WIDGET_W, WIDGET_H);
+            return orig.call(this, WIDGET_W, h);
           }
           const b = Object.assign({}, args[0] || {});
           b.width = WIDGET_W;
-          b.height = WIDGET_H;
+          b.height = h;
+          const pin = pinWidgetPos(this);
+          if (pin) { b.x = pin.x; b.y = pin.y; }
           return orig.call(this, b, args[1]);
         }
       } catch (e) { /* ignore */ }
       return orig.apply(this, arguments);
     };
   });
+  /* setPosition 单独处理：启动阶段同样钉住坐标 */
+  if (typeof BW.prototype.setPosition === 'function') {
+    const origSetPos = BW.prototype.setPosition;
+    BW.prototype.setPosition = function (x, y) {
+      try {
+        if (this.__sodaIsWidget && !this.__sodaAllowResize) {
+          const pin = pinWidgetPos(this);
+          if (pin) return origSetPos.call(this, pin.x, pin.y);
+        }
+      } catch (e) { /* ignore */ }
+      return origSetPos.apply(this, arguments);
+    };
+  }
   /* 视图层也要锁：主进程可能单独给 WebContentsView / contentView 设尺寸 */
   const V = electron.View;
   if (V && V.prototype && typeof V.prototype.setBounds === 'function') {
     const origView = V.prototype.setBounds;
     V.prototype.setBounds = function () {
       try {
-        if (this.__sodaIsWidget) {
+        if (this.__sodaIsWidget && !this.__sodaAllowResize) {
           const b = Object.assign({}, arguments[0] || {});
           b.width = WIDGET_W;
-          b.height = WIDGET_H;
+          b.height = widgetHeightOf(this);
           return origView.call(this, b, arguments[1]);
         }
       } catch (e) { /* ignore */ }
@@ -469,6 +610,8 @@ function fixWidgetSize(wc) {
       }
       /* 标记：之后主进程无论怎么设尺寸，都会被改写回 430×46 */
       try { bw.__sodaIsWidget = true; } catch (e) { /* ignore */ }
+      /* 系统绘制的窗口阴影会在窗口边缘留一圈/一条硬边，播控条自己有阴影窗，这里关掉 */
+      try { if (typeof bw.setHasShadow === 'function') bw.setHasShadow(false); } catch (e) { /* ignore */ }
       try { if (bw.contentView) bw.contentView.__sodaIsWidget = true; } catch (e) { /* ignore */ }
       if (b.width === WIDGET_W && b.height === WIDGET_H) { applied = true; continue; }
       try {
@@ -573,6 +716,8 @@ function findWidgetWindow() {
    启动后 15 秒内，每 1.5 秒纠正一次（间隔大一点，避免肉眼可见的来回闪）。 */
 let widgetBootAt = Date.now();
 let widgetRestoreAt = 0;
+let widgetBootHid = false;   // 启动阶段是否已经先把播控条透明掉
+let widgetLastSeen = '';     // 上一次观察到的位置（连续两次相同才认为稳定）
 
 /* 目前关闭：App 会监听窗口移动并在偏离停靠位时反复吸回，
    外部改位置一定会和它打架（表现就是闪烁争抢）。等找到它的停靠配置再打开。 */
@@ -581,11 +726,12 @@ let widgetPosRestoreEnabled = true;
 function restoreWidgetPos(bw) {
   if (!widgetPosRestoreEnabled) { widgetRestoreTries = 99; return; }
 
-  /* 前 2.5 秒什么都不做：先让 App 把它自己的停靠位置摆完，
-     太早插手只会两边拉扯（这就是之前的「闪烁争抢」）。 */
-  if (Date.now() - widgetBootAt < 2500) return;
-  if (widgetRestoreTries >= 3) return;              // 最多纠正 3 次
-  if (Date.now() - widgetRestoreAt < 3000) return;  // 每次至少隔 3 秒
+  /* 启动阶段窗口是透明的（见 watchWidgetActivity），所以可以早点、密集点纠正：
+     0.6 秒后开始、每 0.6 秒一次、最多 5 次，全部在「还没显示出来」时完成，
+     用户就看不到位置跳动了。 */
+  if (Date.now() - widgetBootAt < 600) return;
+  if (widgetRestoreTries >= 5) return;
+  if (Date.now() - widgetRestoreAt < 600) return;
   widgetRestoreAt = Date.now();
 
   const pos = loadWidgetPos();
@@ -610,6 +756,16 @@ function watchWidgetActivity(bw) {
   const bump = () => { widgetBusyUntil = Date.now() + 1000; };
   try { bw.on('move', bump); } catch (e) { /* ignore */ }
   try { bw.on('resize', bump); } catch (e) { /* ignore */ }
+
+  /* 启动阶段 App 会先把它摆到停靠位，我们随后再挪回上次的位置，肉眼就是「跳一下」。
+     这里在最开始的几秒先把窗口透明掉，等位置落定再显示出来。 */
+  if (!widgetBootHid && Date.now() - widgetBootAt < 8000) {
+    widgetBootHid = true;
+    try { if (typeof bw.setOpacity === 'function') bw.setOpacity(0); } catch (e) { /* ignore */ }
+    setTimeout(function () {
+      try { if (typeof bw.setOpacity === 'function') bw.setOpacity(1); } catch (e) { /* ignore */ }
+    }, 3200);
+  }
 }
 
 function startWidgetGuard() {
@@ -617,9 +773,15 @@ function startWidgetGuard() {
 
   /* 启动几秒后开始定期保存位置（恢复阶段不存，免得把临时位置写进去） */
   setInterval(() => {
-    if (widgetRestoreTries <= 10) return;
+    if (Date.now() - widgetBootAt < 6000) return;   // 启动阶段不存，免得把 App 摆的临时位置写进去
     const bw = findWidgetWindow();
-    if (bw) saveWidgetPos(bw);
+    if (!bw) return;
+    let b = null;
+    try { b = bw.getBounds(); } catch (e) { return; }
+    /* 位置连续 3 秒没动才落盘：防止 App 吸附过程中的中间位置被存下来 */
+    const key = b.x + ',' + b.y;
+    if (key !== widgetLastSeen) { widgetLastSeen = key; return; }
+    saveWidgetPos(bw);
   }, 3000);
 
   widgetGuardTimer = setInterval(() => {
@@ -629,12 +791,12 @@ function startWidgetGuard() {
       let b = null;
       try { b = bw.getBounds(); } catch (e) { continue; }
       if (b.width < 300 || b.width > 520 || b.height < 32 || b.height > 90) continue;
-      watchWidgetActivity(bw);
-      /* 离屏阴影窗：关掉可见性就行，不要去改它的尺寸/位置 */
+      /* 离屏阴影窗：关掉可见性就行，不要去改它的尺寸/位置（也不参与启动隐藏） */
       if (b.x <= -30000) {
         try { if (typeof bw.setOpacity === 'function') bw.setOpacity(0); } catch (e) { /* ignore */ }
         continue;
       }
+      watchWidgetActivity(bw);
 
       /* 启动阶段：把窗口挪回上次退出时的位置（App 会先按自己的停靠逻辑摆一次，所以要多试几次） */
       restoreWidgetPos(bw);

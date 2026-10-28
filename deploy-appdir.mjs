@@ -148,6 +148,21 @@ if (!RES) {
 
 console.log('安装目录: ' + RES);
 
+/* 部署前先构建：src/ 下按功能拆分的模块要拼成 soda-speed.js 再拷贝 */
+try {
+  if (fs.existsSync(path.join(ROOT, 'src')) && fs.existsSync(path.join(ROOT, 'build.mjs'))) {
+    execFileSync(process.execPath, [path.join(ROOT, 'build.mjs')], { stdio: 'inherit' });
+  }
+} catch (e) {
+  console.log('构建失败（继续部署现有 soda-speed.js）: ' + ((e && e.message) || e));
+}
+
+/* soda-speed.js 是构建产物、不再入库，缺了就别往下走，否则会拷出一个空壳 */
+if (!fs.existsSync(path.join(ROOT, 'soda-speed.js'))) {
+  throw new Error('缺少 soda-speed.js，且自动构建没有生成。\n'
+    + '先手动执行一次：node build.mjs');
+}
+
 const ASAR = path.join(RES, 'app.asar');
 const BAK = path.join(RES, 'app.asar.modbak');
 const APPDIR = path.join(RES, 'app');
